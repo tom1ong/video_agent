@@ -1,6 +1,6 @@
 """
 Main entry point for the Video Editing Agent.
-Uses MCP-style tool abstraction with LangChain and Gemini.
+Uses REAL MCP (Model Context Protocol) with LangChain and Gemini.
 """
 
 import os
@@ -18,7 +18,7 @@ def print_banner():
 ║                                                               ║
 ║       🎬 Video Editing Agent with MCP & Gemini 🤖             ║
 ║                                                               ║
-║  Powered by: LangChain | Google Gemini | MCP-style Tools     ║
+║  Powered by: LangChain | Google Gemini | Real MCP Protocol   ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 
@@ -92,10 +92,11 @@ async def main():
     print(f"📍 Place your video files in the workspace directory.\n")
     
     # Initialize agent
-    print("🔄 Initializing video editing agent...")
+    print("🔄 Initializing video editing agent with MCP...")
+    agent = None
     try:
         agent = VideoEditingAgent(gemini_api_key=gemini_api_key, workspace_dir=str(workspace_dir))
-        print(f"✅ Agent ready with {len(agent.tools)} tools!\n")
+        await agent.connect()
     except Exception as e:
         print(f"❌ Error initializing agent: {str(e)}")
         import traceback
@@ -110,49 +111,55 @@ async def main():
     print("Start chatting! (type 'exit' to quit)")
     print("="*60 + "\n")
     
-    while True:
-        try:
-            # Get user input (use asyncio to not block)
-            user_input = await asyncio.get_event_loop().run_in_executor(None, lambda: input("You: ").strip())
-            
-            if not user_input:
-                continue
-            
-            # Handle special commands
-            if user_input.lower() in ['exit', 'quit', 'q']:
-                print("\n👋 Thanks for using Video Editing Agent! Goodbye!")
+    try:
+        while True:
+            try:
+                # Get user input (use asyncio to not block)
+                user_input = await asyncio.get_event_loop().run_in_executor(None, lambda: input("You: ").strip())
+                
+                if not user_input:
+                    continue
+                
+                # Handle special commands
+                if user_input.lower() in ['exit', 'quit', 'q']:
+                    print("\n👋 Thanks for using Video Editing Agent! Goodbye!")
+                    break
+                
+                if user_input.lower() == 'examples':
+                    print_examples()
+                    continue
+                
+                if user_input.lower() == 'clear':
+                    agent.clear_history()
+                    print("\n✅ Conversation history cleared! Starting fresh.\n")
+                    continue
+                
+                if user_input.lower() == 'history':
+                    history = agent.get_history()
+                    if history:
+                        print(f"\n📜 Conversation History:\n{history}\n")
+                    else:
+                        print("\n📜 No conversation history yet.\n")
+                    continue
+                
+                # Send to agent
+                print("\n🤖 Agent: Thinking...\n")
+                response = await agent.chat(user_input)
+                
+                print(f"\n🤖 Agent: {response}\n")
+                print("-" * 60 + "\n")
+                
+            except KeyboardInterrupt:
+                print("\n\n👋 Thanks for using Video Editing Agent! Goodbye!")
                 break
-            
-            if user_input.lower() == 'examples':
-                print_examples()
+            except Exception as e:
+                print(f"\n❌ Error: {str(e)}\n")
                 continue
-            
-            if user_input.lower() == 'clear':
-                agent.clear_history()
-                print("\n✅ Conversation history cleared! Starting fresh.\n")
-                continue
-            
-            if user_input.lower() == 'history':
-                history = agent.get_history()
-                if history:
-                    print(f"\n📜 Conversation History:\n{history}\n")
-                else:
-                    print("\n📜 No conversation history yet.\n")
-                continue
-            
-            # Send to agent
-            print("\n🤖 Agent: Thinking...\n")
-            response = await agent.chat(user_input)
-            
-            print(f"\n🤖 Agent: {response}\n")
-            print("-" * 60 + "\n")
-            
-        except KeyboardInterrupt:
-            print("\n\n👋 Thanks for using Video Editing Agent! Goodbye!")
-            break
-        except Exception as e:
-            print(f"\n❌ Error: {str(e)}\n")
-            continue
+    finally:
+        # Clean up MCP connection
+        if agent:
+            print("\n🔌 Disconnecting from MCP server...")
+            await agent.disconnect()
 
 
 if __name__ == "__main__":

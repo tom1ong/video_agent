@@ -1,6 +1,6 @@
 """
-LangChain Agent with MCP-style Tool Integration.
-Uses async MCP-inspired tool abstraction for reliability.
+LangChain Agent with Real MCP Integration.
+Connects to the MCP server as a client.
 """
 
 import os
@@ -12,15 +12,17 @@ from langchain.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.tools import Tool
 from langchain.memory import ConversationBufferMemory
-from mcp_server import VideoEditingMCPServer
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from contextlib import asynccontextmanager
 
 
 class VideoEditingAgent:
-    """LangChain Agent with MCP-style video editing tools."""
+    """LangChain Agent that connects to a real MCP server."""
     
     def __init__(self, gemini_api_key: str = None, workspace_dir: str = "./workspace"):
         """
-        Initialize the video editing agent.
+        Initialize the video editing agent with MCP client.
         
         Args:
             gemini_api_key: Google Gemini API key
@@ -30,8 +32,12 @@ class VideoEditingAgent:
         if gemini_api_key:
             os.environ["GOOGLE_API_KEY"] = gemini_api_key
         
-        # Initialize MCP-style server with API key for caching
-        self.mcp_server = VideoEditingMCPServer(workspace_dir, gemini_api_key=gemini_api_key)
+        self.gemini_api_key = gemini_api_key
+        self.workspace_dir = workspace_dir
+        
+        # MCP session will be initialized in async context
+        self.session: ClientSession = None
+        self.exit_stack = None
         
         # Initialize Gemini LLM
         self.llm = ChatGoogleGenerativeAI(
@@ -39,9 +45,6 @@ class VideoEditingAgent:
             temperature=1,
             convert_system_message_to_human=True
         )
-        
-        # Create tools from MCP server
-        self.tools = self._create_langchain_tools()
         
         # Initialize conversation memory
         self.memory = ConversationBufferMemory(
@@ -51,18 +54,67 @@ class VideoEditingAgent:
             output_key="output"
         )
         
+        # Tools and agent will be created after MCP connection
+        self.tools = []
+        self.agent_executor = None
+    
+    async def connect(self):
+        """Connect to the MCP server."""
+        import sys
+        from contextlib import AsyncExitStack
+        
+        # Set up MCP server parameters
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-u", "mcp_server.py"],
+            env={
+                "WORKSPACE_DIR": self.workspace_dir,
+                "GEMINI_API_KEY": self.gemini_api_key or ""
+            }
+        )
+        
+        # Create exit stack to manage cleanup
+        self.exit_stack = AsyncExitStack()
+        
+        # Connect to MCP server via stdio
+        stdio_transport = await self.exit_stack.enter_async_context(
+            stdio_client(server_params)
+        )
+        read, write = stdio_transport
+        
+        # Initialize MCP session
+        self.session = await self.exit_stack.enter_async_context(
+            ClientSession(read, write)
+        )
+        
+        # Initialize the session
+        await self.session.initialize()
+        
+        # Get tools from MCP server
+        tools_result = await self.session.list_tools()
+        
+        # Create LangChain tools from MCP tools
+        self.tools = self._create_langchain_tools(tools_result.tools)
+        
         # Create the agent
         self.agent_executor = self._create_agent()
+        
+        print(f"✅ Connected to MCP server with {len(self.tools)} tools!")
     
-    def _create_langchain_tools(self) -> List[Tool]:
+    async def disconnect(self):
+        """Disconnect from the MCP server."""
+        if self.exit_stack:
+            await self.exit_stack.aclose()
+    
+    def _create_langchain_tools(self, mcp_tools) -> List[Tool]:
         """Convert MCP tools to LangChain Tools."""
         langchain_tools = []
         
-        for mcp_tool in self.mcp_server.list_tools():
-            tool_name = mcp_tool["name"]
-            tool_description = mcp_tool["description"]
+        for mcp_tool in mcp_tools:
+            tool_name = mcp_tool.name
+            tool_description = mcp_tool.description
             
-            # Create tool function
+            # Create tool function that calls MCP
             def create_tool_func(name: str):
                 async def tool_func(input_str: str) -> str:
                     try:
@@ -74,11 +126,11 @@ class VideoEditingAgent:
                             params = {"video_path": input_str}
                         
                         # Call MCP server
-                        result = await self.mcp_server.call_tool(name, params)
+                        result = await self.session.call_tool(name, params)
                         
                         # Extract text from MCP response
-                        if "content" in result:
-                            texts = [c["text"] for c in result["content"] if c.get("type") == "text"]
+                        if result.content:
+                            texts = [c.text for c in result.content if hasattr(c, 'text')]
                             return "\n".join(texts)
                         
                         return str(result)
@@ -90,8 +142,8 @@ class VideoEditingAgent:
             # Create LangChain tool with async support
             tool = Tool(
                 name=tool_name,
-                func=lambda x: asyncio.run(create_tool_func(tool_name)(x)),  # Sync wrapper for compatibility
-                coroutine=create_tool_func(tool_name),  # Async version
+                func=lambda x, name=tool_name: asyncio.run(create_tool_func(name)(x)),
+                coroutine=create_tool_func(tool_name),
                 description=tool_description
             )
             langchain_tools.append(tool)
@@ -101,13 +153,25 @@ class VideoEditingAgent:
     def _create_agent(self) -> AgentExecutor:
         """Create the LangChain agent."""
         
-        template = """You are an intelligent video editing assistant. You help users edit their videos by understanding their natural language requests and using the available video editing tools.
+        template = """You are a friendly video editing assistant. You can have conversations AND use tools to edit videos.
 
-You have access to the following tools:
+IMPORTANT: Only use tools when the user asks you to DO something with a video (edit, cut, analyze, etc).
+For greetings, questions, or general chat - just respond directly without using any tools.
 
+You have access to these tools:
 {tools}
 
-Use the following format:
+WHEN TO USE TOOLS:
+- User asks to edit/cut/trim/modify a video
+- User asks for video information or analysis
+- User wants to create/merge/process videos
+
+WHEN NOT TO USE TOOLS:
+- Greetings (hi, hello, etc.) - just respond friendly
+- General questions about capabilities - just explain what you can do
+- Casual conversation - just chat normally
+
+Use this format:
 
 Question: the input question you must answer
 Thought: you should always think about what to do
@@ -118,19 +182,10 @@ Observation: the result of the action
 Thought: I now know the final answer
 Final Answer: the final answer to the original input question
 
-Important guidelines:
-- Users can reference videos by just their filename (e.g. "video.mp4") - the system automatically looks in the workspace directory
-- If a user provides just a filename, use it as-is - DO NOT add "workspace/" prefix
-- For complex edits, break them down into multiple tool calls
-- Keep track of intermediate output files as inputs for subsequent operations
-- Output videos are saved to the workspace directory
-- Always provide the final output file path to the user
-- IMPORTANT: Remember the conversation history! If you asked the user for information (like a filename) and they provide it, use that information to complete the original request
+For simple conversations (like greetings), skip straight to the Final Answer without using any tools.
 
 Previous conversation:
 {chat_history}
-
-Be conversational and helpful.
 
 Begin!
 
@@ -177,3 +232,4 @@ Thought: {agent_scratchpad}"""
     def get_history(self) -> str:
         """Get the conversation history."""
         return self.memory.load_memory_variables({}).get("chat_history", "")
+
