@@ -4,9 +4,10 @@ These tools are exposed via MCP for the LangChain agent.
 """
 
 import os
+import sys
 import asyncio
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from moviepy import (
     VideoFileClip,
     concatenate_videoclips,
@@ -22,11 +23,12 @@ from google.genai import types
 class VideoTools:
     """Video editing tools that will be exposed via MCP."""
     
-    def __init__(self, workspace_dir: str = "./workspace", gemini_api_key: Optional[str] = None):
+    def __init__(self, workspace_dir: str = "./workspace", gemini_api_key: Optional[str] = None, model_name: str = "gemini-2.5-flash"):
         """Initialize video tools with a workspace directory."""
         self.workspace_dir = Path(workspace_dir)
         self.workspace_dir.mkdir(exist_ok=True)
         self.operation_counter = 0
+        self.model_name = model_name
         
         # Initialize Gemini client for caching
         self.genai_client = None
@@ -113,10 +115,11 @@ class VideoTools:
             
             def _cut():
                 clip = VideoFileClip(resolved_path)
-                cut_clip = clip.subclip(start_time, end_time)
+                # Use subclipped() for MoviePy 1.0+ or slice notation
+                cut_clip = clip.subclipped(start_time, end_time)
                 
                 output_path = self._generate_output_filename("cut")
-                cut_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                cut_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 clip.close()
                 cut_clip.close()
@@ -150,9 +153,9 @@ class VideoTools:
                 start = trim_start
                 end = duration - trim_end
                 
-                trimmed_clip = clip.subclip(start, end)
+                trimmed_clip = clip.subclipped(start, end)
                 output_path = self._generate_output_filename("trimmed")
-                trimmed_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                trimmed_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 clip.close()
                 trimmed_clip.close()
@@ -182,7 +185,7 @@ class VideoTools:
                 final_clip = concatenate_videoclips(clips, method="compose")
                 
                 output_path = self._generate_output_filename("concatenated")
-                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 for clip in clips:
                     clip.close()
@@ -231,26 +234,27 @@ class VideoTools:
                 
                 # Create text clip
                 txt_clip = TextClip(
-                    text, 
-                    fontsize=fontsize, 
+                    text=text, 
+                    font_size=fontsize, 
                     color=color,
-                    font='Arial'
+                    method='caption',
+                    size=(clip.w - 100, None)  # Leave some margin
                 )
-                txt_clip = txt_clip.set_start(start_time).set_duration(text_duration)
+                txt_clip = txt_clip.with_start(start_time).with_duration(text_duration)
                 
                 # Position the text
                 if position == "center":
-                    txt_clip = txt_clip.set_position("center")
+                    txt_clip = txt_clip.with_position("center")
                 elif position == "top":
-                    txt_clip = txt_clip.set_position(("center", 50))
+                    txt_clip = txt_clip.with_position(("center", 50))
                 elif position == "bottom":
-                    txt_clip = txt_clip.set_position(("center", clip.h - 100))
+                    txt_clip = txt_clip.with_position(("center", clip.h - 100))
                 
                 # Composite video
                 final_clip = CompositeVideoClip([clip, txt_clip])
                 
                 output_path = self._generate_output_filename("text_overlay")
-                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 clip.close()
                 final_clip.close()
@@ -283,7 +287,7 @@ class VideoTools:
                 final_clip = clip.fx(lambda c: c.speedx(speed_factor))
                 
                 output_path = self._generate_output_filename(f"speed_{speed_factor}x")
-                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 clip.close()
                 final_clip.close()
@@ -312,7 +316,7 @@ class VideoTools:
                 clip = VideoFileClip(resolved_path)
                 
                 output_path = self._generate_output_filename("audio", ".mp3")
-                clip.audio.write_audiofile(output_path)
+                clip.audio.write_audiofile(output_path, logger=None)
                 
                 clip.close()
                 
@@ -345,7 +349,7 @@ class VideoTools:
                 final_clip = video_clip.set_audio(audio_clip)
                 
                 output_path = self._generate_output_filename("merged")
-                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 video_clip.close()
                 audio_clip.close()
@@ -379,13 +383,13 @@ class VideoTools:
                     clip = VideoFileClip(resolved_path)
                     # Take a segment from the beginning
                     duration = min(segment_duration, clip.duration)
-                    segment = clip.subclip(0, duration)
+                    segment = clip.subclipped(0, duration)
                     segments.append(segment)
                 
                 final_clip = concatenate_videoclips(segments, method="compose")
                 
                 output_path = self._generate_output_filename("storyline")
-                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac')
+                final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
                 
                 for segment in segments:
                     segment.close()
@@ -397,90 +401,172 @@ class VideoTools:
         except Exception as e:
             return f"Error creating storyline: {str(e)}"
     
-    async def send_cache(self, video_path: str, ttl_minutes: int = 60) -> Dict[str, Any]:
+    async def send_cache(self, video_paths: Union[str, List[str]], ttl_minutes: int = 60) -> Dict[str, Any]:
         """
-        Upload video and create a cache for it in Gemini.
+        Upload video(s) and create cache(s) for them in Gemini.
         This caches the visual tokens for cost savings on repeated queries.
+        Supports both single video and multiple videos (caches in parallel).
         
         Args:
-            video_path: Path to the video file (relative paths look in workspace)
+            video_paths: Path to video file OR list of video paths (relative paths look in workspace)
             ttl_minutes: Time to live for the cache in minutes (default: 60)
             
         Returns:
-            Dictionary with cache information
+            Dictionary with cache information (single video or multiple videos)
         """
+        # Normalize input to always be a list
+        is_single = isinstance(video_paths, str)
+        paths_list = [video_paths] if is_single else video_paths
+        
         try:
             if not self.genai_client:
                 return {"error": "Gemini API client not initialized. Please provide API key."}
             
-            resolved_path = self._resolve_video_path(video_path)
-            
-            # Check if cache already exists for this video
-            if video_path in self.video_caches:
-                return {
-                    "status": "already_cached",
-                    "video_path": video_path,
-                    "cache_name": self.video_caches[video_path]["cache_name"],
-                    "message": "Video is already cached. Using existing cache."
-                }
-            
-            loop = asyncio.get_event_loop()
-            
-            def _upload_and_cache():
-                # Upload the video using the Files API
-                video_file = self.genai_client.files.upload(file=resolved_path)
+            # If single video, use simple logic
+            if is_single:
+                video_path = paths_list[0]
+                resolved_path = self._resolve_video_path(video_path)
                 
-                # Wait for the file to finish processing
-                while video_file.state.name == 'PROCESSING':
-                    print(f'⏳ Waiting for video {video_path} to be processed...')
-                    time.sleep(2)
-                    video_file = self.genai_client.files.get(name=video_file.name)
+                # Check if cache already exists for this video
+                if video_path in self.video_caches:
+                    return {
+                        "status": "already_cached",
+                        "video_path": video_path,
+                        "cache_name": self.video_caches[video_path]["cache_name"],
+                        "message": "Video is already cached. Using existing cache."
+                    }
                 
-                print(f'✅ Video processing complete: {video_file.uri}')
+                loop = asyncio.get_event_loop()
                 
-                # Create a cache with specified TTL
-                cache = self.genai_client.caches.create(
-                    model='models/gemini-2.0-flash-001',
-                    config=types.CreateCachedContentConfig(
-                        display_name=f'video_cache_{Path(video_path).stem}',
-                        system_instruction=(
-                            'You are an expert video analyzer. Your job is to analyze '
-                            'and answer questions about the video content you have access to. '
-                            'Provide detailed, accurate information based on what you observe in the video.'
-                        ),
-                        contents=[video_file],
-                        ttl=f"{ttl_minutes * 60}s",
+                def _upload_and_cache():
+                    # Upload the video using the Files API
+                    video_file = self.genai_client.files.upload(file=resolved_path)
+                    
+                    # Wait for the file to be ACTIVE (not just done processing)
+                    max_wait_time = 300  # 5 minutes max
+                    elapsed_time = 0
+                    while video_file.state.name != 'ACTIVE':
+                        if video_file.state.name == 'FAILED':
+                            # Get detailed error information
+                            error_msg = f"Video processing failed.\n"
+                            error_msg += f"  State: {video_file.state}\n"
+                            error_msg += f"  File name: {video_file.name}\n"
+                            error_msg += f"  Display name: {video_file.display_name}\n"
+                            error_msg += f"  MIME type: {video_file.mime_type}\n"
+                            error_msg += f"  Size: {video_file.size_bytes} bytes\n"
+                            if hasattr(video_file, 'error'):
+                                error_msg += f"  Error: {video_file.error}\n"
+                            error_msg += "\nPossible reasons:\n"
+                            error_msg += "  - Unsupported video format or codec\n"
+                            error_msg += "  - Video file is corrupted\n"
+                            error_msg += "  - Video too large or too long\n"
+                            error_msg += "\nTry converting the video to a standard format (H.264 MP4)"
+                            raise Exception(error_msg)
+                        
+                        if elapsed_time >= max_wait_time:
+                            raise Exception(f"Timeout waiting for video to be processed after {max_wait_time}s")
+                        
+                        print(f'⏳ Waiting for video {video_path} to be ACTIVE (current: {video_file.state.name}, elapsed: {elapsed_time}s)...', file=sys.stderr)
+                        time.sleep(2)
+                        elapsed_time += 2
+                        video_file = self.genai_client.files.get(name=video_file.name)
+                    
+                    print(f'✅ Video is ACTIVE and ready: {video_file.uri}', file=sys.stderr)
+                    
+                    # Create a cache with specified TTL
+                    cache = self.genai_client.caches.create(
+                        model=f'models/{self.model_name}',
+                        config=types.CreateCachedContentConfig(
+                            display_name=f'video_cache_{Path(video_path).stem}',
+                            contents=[video_file],
+                            ttl=f"{ttl_minutes * 60}s",
+                        )
                     )
-                )
+                    
+                    # Store cache information
+                    cache_info = {
+                        "cache_name": cache.name,
+                        "file_uri": video_file.uri,
+                        "file_name": video_file.name,
+                        "expire_time": cache.expire_time.isoformat() if hasattr(cache.expire_time, 'isoformat') else str(cache.expire_time),
+                        "token_count": cache.usage_metadata.total_token_count if hasattr(cache, 'usage_metadata') else None
+                    }
+                    
+                    return cache_info
                 
-                # Store cache information
-                cache_info = {
-                    "cache_name": cache.name,
-                    "file_uri": video_file.uri,
-                    "file_name": video_file.name,
-                    "expire_time": cache.expire_time.isoformat() if hasattr(cache.expire_time, 'isoformat') else str(cache.expire_time),
-                    "token_count": cache.usage_metadata.total_token_count if hasattr(cache, 'usage_metadata') else None
+                cache_info = await loop.run_in_executor(None, _upload_and_cache)
+                
+                # Store cache info for future use
+                self.video_caches[video_path] = cache_info
+                
+                return {
+                    "status": "cached",
+                    "video_path": video_path,
+                    "cache_name": cache_info["cache_name"],
+                    "file_uri": cache_info["file_uri"],
+                    "expire_time": cache_info["expire_time"],
+                    "token_count": cache_info["token_count"],
+                    "message": f"Video cached successfully. Cache will expire at {cache_info['expire_time']}"
                 }
+            
+            # Multiple videos - cache in parallel
+            else:
+                print(f"📦 Caching {len(paths_list)} videos in parallel...", file=sys.stderr)
                 
-                return cache_info
-            
-            cache_info = await loop.run_in_executor(None, _upload_and_cache)
-            
-            # Store cache info for future use
-            self.video_caches[video_path] = cache_info
-            
-            return {
-                "status": "cached",
-                "video_path": video_path,
-                "cache_name": cache_info["cache_name"],
-                "file_uri": cache_info["file_uri"],
-                "expire_time": cache_info["expire_time"],
-                "token_count": cache_info["token_count"],
-                "message": f"Video cached successfully. Cache will expire at {cache_info['expire_time']}"
-            }
+                # Cache videos that aren't already cached
+                tasks = []
+                already_cached = []
+                
+                for vp in paths_list:
+                    if vp in self.video_caches:
+                        already_cached.append(vp)
+                    else:
+                        tasks.append(self.send_cache(vp, ttl_minutes))
+                
+                # Execute all caching tasks in parallel
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                else:
+                    results = []
+                
+                # Process results
+                cached_videos = {}
+                errors = []
+                
+                # Add already cached videos
+                for vp in already_cached:
+                    cached_videos[vp] = {
+                        "status": "already_cached",
+                        "video_path": vp,
+                        "cache_name": self.video_caches[vp]["cache_name"]
+                    }
+                
+                # Add newly cached videos
+                task_idx = 0
+                for vp in paths_list:
+                    if vp not in already_cached:
+                        result = results[task_idx]
+                        task_idx += 1
+                        
+                        if isinstance(result, Exception):
+                            errors.append({"video_path": vp, "error": str(result)})
+                        elif isinstance(result, dict) and "error" in result:
+                            errors.append({"video_path": vp, "error": result["error"]})
+                        else:
+                            cached_videos[vp] = result
+                
+                return {
+                    "status": "completed",
+                    "total_videos": len(paths_list),
+                    "cached_successfully": len(cached_videos),
+                    "failed": len(errors),
+                    "cached_videos": cached_videos,
+                    "errors": errors if errors else None,
+                    "message": f"Cached {len(cached_videos)}/{len(paths_list)} videos successfully"
+                }
             
         except Exception as e:
-            return {"error": f"Error caching video: {str(e)}"}
+            return {"error": f"Error caching video(s): {str(e)}"}
     
     async def get_video_summary(self, video_path: str, custom_prompt: Optional[str] = None) -> str:
         """
@@ -500,7 +586,7 @@ class VideoTools:
             
             # Check if video is cached, if not, cache it
             if video_path not in self.video_caches:
-                print(f"📦 Video not cached yet. Caching {video_path}...")
+                print(f"📦 Video not cached yet. Caching {video_path}...", file=sys.stderr)
                 cache_result = await self.send_cache(video_path)
                 if "error" in cache_result:
                     return f"Error: {cache_result['error']}"
@@ -521,7 +607,7 @@ class VideoTools:
                 
                 # Generate content using the cached video
                 response = self.genai_client.models.generate_content(
-                    model='models/gemini-2.0-flash-001',
+                    model=f'models/{self.model_name}',
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         cached_content=cache_info["cache_name"]
@@ -532,7 +618,7 @@ class VideoTools:
                 if hasattr(response, 'usage_metadata'):
                     print(f"📊 Token usage - Total: {response.usage_metadata.total_token_count}, "
                           f"Cached: {response.usage_metadata.cached_content_token_count}, "
-                          f"New prompt: {response.usage_metadata.prompt_token_count}")
+                          f"New prompt: {response.usage_metadata.prompt_token_count}", file=sys.stderr)
                 
                 return response.text
             
@@ -542,49 +628,129 @@ class VideoTools:
         except Exception as e:
             return f"Error generating video summary: {str(e)}"
     
-    async def query_cached_video(self, video_path: str, query: str) -> str:
+    async def query_cached_video(self, video_paths: Union[str, List[str]], query: str) -> str:
         """
-        Query a cached video with a custom question.
-        Automatically caches the video if not already cached.
+        Query cached video(s) with a custom question.
+        Automatically caches video(s) if not already cached.
+        Supports both single video and multiple videos.
         
         Args:
-            video_path: Path to the video file (relative paths look in workspace)
-            query: Question or query about the video
+            video_paths: Path to video file OR list of video paths (relative paths look in workspace)
+            query: Question or query about the video(s)
             
         Returns:
             Response text from Gemini
         """
+        # Normalize input to always be a list
+        is_single = isinstance(video_paths, str)
+        paths_list = [video_paths] if is_single else video_paths
+        
         try:
             if not self.genai_client:
                 return "Error: Gemini API client not initialized. Please provide API key."
             
-            # Check if video is cached, if not, cache it
-            if video_path not in self.video_caches:
-                print(f"📦 Video not cached yet. Caching {video_path}...")
-                cache_result = await self.send_cache(video_path)
-                if "error" in cache_result:
-                    return f"Error: {cache_result['error']}"
-            
-            cache_info = self.video_caches[video_path]
-            loop = asyncio.get_event_loop()
-            
-            def _query_video():
-                # Generate content using the cached video
-                response = self.genai_client.models.generate_content(
-                    model='models/gemini-2.0-flash-001',
-                    contents=query,
-                    config=types.GenerateContentConfig(
-                        cached_content=cache_info["cache_name"]
-                    )
-                )
+            # Single video - use simple cached content query
+            if is_single:
+                video_path = paths_list[0]
                 
-                return response.text
+                # Check if video is cached, if not, cache it
+                if video_path not in self.video_caches:
+                    print(f"📦 Video not cached yet. Caching {video_path}...", file=sys.stderr)
+                    cache_result = await self.send_cache(video_path)
+                    if "error" in cache_result:
+                        return f"Error: {cache_result['error']}"
+                
+                cache_info = self.video_caches[video_path]
+                loop = asyncio.get_event_loop()
+                
+                def _query_video():
+                    # Generate content using the cached video
+                    response = self.genai_client.models.generate_content(
+                        model=f'models/{self.model_name}',
+                        contents=query,
+                        config=types.GenerateContentConfig(
+                            cached_content=cache_info["cache_name"]
+                        )
+                    )
+                    
+                    return response.text
+                
+                result = await loop.run_in_executor(None, _query_video)
+                return result
             
-            result = await loop.run_in_executor(None, _query_video)
-            return result
+            # Multiple videos - query all together
+            else:
+                # Ensure all videos are cached
+                uncached_videos = [vp for vp in paths_list if vp not in self.video_caches]
+                if uncached_videos:
+                    print(f"📦 Caching {len(uncached_videos)} videos...", file=sys.stderr)
+                    cache_results = await self.send_cache(uncached_videos)
+                    if "error" in cache_results:
+                        return f"Error: {cache_results['error']}"
+                    if cache_results.get("errors"):
+                        error_msg = "Some videos failed to cache:\n"
+                        for err in cache_results["errors"]:
+                            error_msg += f"  - {err['video_path']}: {err['error']}\n"
+                        return error_msg
+                
+                # Build contents list with all cached videos
+                loop = asyncio.get_event_loop()
+                
+                def _query_multiple():
+                    # Get all video files from the Files API
+                    video_files = []
+                    for video_path in paths_list:
+                        cache_info = self.video_caches[video_path]
+                        file_name = cache_info["file_name"]
+                        video_file = self.genai_client.files.get(name=file_name)
+                        video_files.append(video_file)
+                    
+                    # Create a mapping description for the LLM
+                    video_mapping = "\n".join([
+                        f"Video {i+1}: {paths_list[i]}" 
+                        for i in range(len(paths_list))
+                    ])
+                    
+                    # Enhanced query with video identification instructions
+                    enhanced_query = f"""You are analyzing {len(paths_list)} videos. Here are the video file names:
+
+{video_mapping}
+
+IMPORTANT: When providing an edit plan or referring to specific clips, you MUST include the video filename (e.g., "video1.mp4") in your response so we know which video to extract the clip from.
+
+User query: {query}
+
+When providing timestamps or edit plans, use this JSON format:
+{{
+  "clip_1": {{
+    "video": "filename.mp4",  // REQUIRED: which video file this clip is from
+    "start": X.X,              // start time in seconds
+    "end": Y.Y,                // end time in seconds  
+    "reason": "description"    // why this clip was chosen
+  }},
+  "clip_2": {{...}},
+  ...
+}}
+"""
+                    
+                    # Generate content with all videos in context
+                    response = self.genai_client.models.generate_content(
+                        model=f'models/{self.model_name}',
+                        contents=[*video_files, enhanced_query]
+                    )
+                    
+                    # Print usage metadata
+                    if hasattr(response, 'usage_metadata'):
+                        print(f"📊 Token usage - Total: {response.usage_metadata.total_token_count}, "
+                              f"Prompt: {response.usage_metadata.prompt_token_count}", file=sys.stderr)
+                    
+                    return response.text
+                
+                result = await loop.run_in_executor(None, _query_multiple)
+                return result
             
         except Exception as e:
-            return f"Error querying video: {str(e)}"
+            return f"Error querying video(s): {str(e)}"
     
     def get_cache_info(self, video_path: str) -> Dict[str, Any]:
         """

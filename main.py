@@ -31,6 +31,7 @@ I can help you:
   • Change video speed
   • Extract and merge audio
   • Create storylines from multiple clips
+  • List, delete, and play video files
   • And much more!
 
 Just tell me what you want to do in natural language!
@@ -49,6 +50,11 @@ Example commands you can try:
   • "Speed up video1.mp4 by 2x"
   • "Create a storyline from video1.mp4, video2.mp4, video3.mp4"
   • "Extract audio from video1.mp4"
+  
+File management commands:
+  • "List files in the workspace" (ls command)
+  • "Delete output.mp4" (rm command)
+  • "Play IMG_5437.MOV" (open command)
   
 Special commands:
   • 'examples' - Show these examples again
@@ -71,8 +77,9 @@ async def main():
     # Load environment variables
     load_dotenv('.env.local')
     
-    # Get API key
+    # Get API key and model name
     gemini_api_key = os.getenv("GEMINI_API_KEY")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
     if not gemini_api_key:
         print("\n❌ Error: GEMINI_API_KEY not found!")
@@ -89,13 +96,18 @@ async def main():
     # Print banner
     print_banner()
     print(f"📁 Workspace directory: {workspace_dir.absolute()}")
+    print(f"🤖 Using model: {model_name}")
     print(f"📍 Place your video files in the workspace directory.\n")
     
     # Initialize agent
     print("🔄 Initializing video editing agent with MCP...")
     agent = None
     try:
-        agent = VideoEditingAgent(gemini_api_key=gemini_api_key, workspace_dir=str(workspace_dir))
+        agent = VideoEditingAgent(
+            gemini_api_key=gemini_api_key, 
+            workspace_dir=str(workspace_dir),
+            model_name=model_name
+        )
         await agent.connect()
     except Exception as e:
         print(f"❌ Error initializing agent: {str(e)}")
