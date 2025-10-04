@@ -242,20 +242,27 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="search_music",
-            description="Search for music tracks on Epidemic Sound. Returns track information including title, artist, BPM, genres, moods, and track ID.",
+            description="Search for music tracks on Epidemic Sound. Use 'search_term' parameter with your query (e.g., 'cozy vlog', 'energetic workout'). Returns track information including title, artist, BPM, genres, moods, and track ID.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "search_term": {
                         "type": "string",
-                        "description": "Search query (e.g., 'cozy vlog', 'energetic workout', 'cinematic trailer')"
+                        "description": "The music search term/query (e.g., 'cozy vlog', 'energetic workout', 'cinematic trailer')"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Alias for search_term (use search_term instead)"
                     },
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of results to return (default: 10, max: 50)"
                     }
                 },
-                "required": ["search_term"]
+                "anyOf": [
+                    {"required": ["search_term"]},
+                    {"required": ["query"]}
+                ]
             }
         ),
         Tool(
@@ -475,8 +482,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(type="text", text=f"Error playing video: {str(e)}")]
         
         elif name == "search_music":
+            # Support both 'search_term' and 'query' for backward compatibility
+            search_term = arguments.get("search_term") or arguments.get("query")
+            if not search_term:
+                return [TextContent(type="text", text="Error: 'search_term' parameter is required for search_music")]
+            
             result = await video_tools.search_music(
-                arguments["search_term"],
+                search_term,
                 arguments.get("limit", 10)
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
