@@ -124,7 +124,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="merge_audio_video",
-            description="Combine an audio file with a video file",
+            description="Combine an audio file with a video file. Automatically trims audio if it's longer than the video, or loops it if shorter to match video duration perfectly.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -238,6 +238,42 @@ async def list_tools() -> list[Tool]:
                     "video_path": {"type": "string", "description": "Path to the video file to play"}
                 },
                 "required": ["video_path"]
+            }
+        ),
+        Tool(
+            name="search_music",
+            description="Search for music tracks on Epidemic Sound. Returns track information including title, artist, BPM, genres, moods, and track ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search_term": {
+                        "type": "string",
+                        "description": "Search query (e.g., 'cozy vlog', 'energetic workout', 'cinematic trailer')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 10, max: 50)"
+                    }
+                },
+                "required": ["search_term"]
+            }
+        ),
+        Tool(
+            name="download_music",
+            description="Download a music track from Epidemic Sound using the track ID obtained from search_music. The audio file will be saved to the workspace as an MP3 file.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "track_id": {
+                        "type": "string",
+                        "description": "The track ID from search_music results"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional custom filename (without extension). If not provided, uses track ID."
+                    }
+                },
+                "required": ["track_id"]
             }
         )
     ]
@@ -437,6 +473,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(type="text", text=f"🎬 Opening video: {video_path.name}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error playing video: {str(e)}")]
+        
+        elif name == "search_music":
+            result = await video_tools.search_music(
+                arguments["search_term"],
+                arguments.get("limit", 10)
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        elif name == "download_music":
+            result = await video_tools.download_music(
+                arguments["track_id"],
+                arguments.get("filename")
+            )
+            return [TextContent(type="text", text=f"Music downloaded successfully. File: {result}")]
         
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

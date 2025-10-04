@@ -7,10 +7,12 @@ import os
 import sys
 import asyncio
 import time
+import requests
 from typing import Dict, Any, List, Optional, Union
 from moviepy import (
     VideoFileClip,
     concatenate_videoclips,
+    concatenate_audioclips,
     TextClip,
     CompositeVideoClip,
     AudioFileClip
@@ -37,6 +39,16 @@ class VideoTools:
         
         # Store cache information for videos
         self.video_caches: Dict[str, Dict[str, Any]] = {}  # video_path -> {cache_name, file_uri, etc}
+        
+        # Epidemic Sound credentials
+        self.epidemic_access_key_id = os.getenv("EPIDEMIC_ACCESS_KEY_ID")
+        self.epidemic_access_key_secret = os.getenv("EPIDEMIC_ACCESS_KEY_SECRET")
+        self.epidemic_user_id = os.getenv("EPIDEMIC_USER_ID", "default_user")
+        
+        # Cache for Epidemic Sound tokens
+        self._epidemic_partner_token: Optional[str] = None
+        self._epidemic_user_token: Optional[str] = None
+        self._epidemic_token_expiry: float = 0
     
     def _resolve_video_path(self, video_path: str) -> str:
         """
@@ -329,6 +341,7 @@ class VideoTools:
     async def merge_audio_video(self, video_path: str, audio_path: str) -> str:
         """
         Merge an audio file with a video file.
+        Automatically trims or extends audio to match video duration.
         
         Args:
             video_path: Path to the input video (relative paths look in workspace)
@@ -346,7 +359,25 @@ class VideoTools:
                 video_clip = VideoFileClip(resolved_video_path)
                 audio_clip = AudioFileClip(resolved_audio_path)
                 
-                final_clip = video_clip.set_audio(audio_clip)
+                video_duration = video_clip.duration
+                audio_duration = audio_clip.duration
+                
+                print(f"📊 Video duration: {video_duration:.2f}s, Audio duration: {audio_duration:.2f}s", file=sys.stderr)
+                
+                # Adjust audio to match video duration
+                if audio_duration > video_duration:
+                    # Trim audio to match video length
+                    print(f"✂️  Trimming audio to match video duration ({video_duration:.2f}s)", file=sys.stderr)
+                    audio_clip = audio_clip.subclipped(0, video_duration)
+                elif audio_duration < video_duration:
+                    # Loop audio to fill video duration
+                    print(f"🔁 Audio is shorter than video. Looping to fill {video_duration:.2f}s", file=sys.stderr)
+                    loops_needed = int(video_duration / audio_duration) + 1
+                    audio_clips = [audio_clip] * loops_needed
+                    audio_clip = concatenate_audioclips(audio_clips).subclipped(0, video_duration)
+                
+                # Use with_audio for MoviePy 2.0+ compatibility
+                final_clip = video_clip.with_audio(audio_clip)
                 
                 output_path = self._generate_output_filename("merged")
                 final_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', logger=None)
@@ -354,6 +385,8 @@ class VideoTools:
                 video_clip.close()
                 audio_clip.close()
                 final_clip.close()
+                
+                print(f"✅ Merged video saved: {output_path}", file=sys.stderr)
                 
                 return output_path
             
@@ -772,4 +805,175 @@ When providing timestamps or edit plans, use this JSON format:
                 "status": "not_cached",
                 "message": f"Video {video_path} is not cached yet."
             }
+    
+    def _get_epidemic_partner_token(self) -> str:
+        """Get partner token from Epidemic Sound API."""
+        if not self.epidemic_access_key_id or not self.epidemic_access_key_secret:
+            raise Exception("Epidemic Sound credentials not configured. Please set EPIDEMIC_ACCESS_KEY_ID and EPIDEMIC_ACCESS_KEY_SECRET environment variables.")
+        
+        resp = requests.post(
+            "https://partner-content-api.epidemicsound.com/v0/partner-token",
+            json={
+                "accessKeyId": self.epidemic_access_key_id,
+                "accessKeySecret": self.epidemic_access_key_secret
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        return resp.json()["accessToken"]
+    
+    def _get_epidemic_user_token(self) -> str:
+        """Get user token from Epidemic Sound API using partner token."""
+        # Check if we have a valid cached token (assume 1 hour validity)
+        current_time = time.time()
+        if self._epidemic_user_token and current_time < self._epidemic_token_expiry:
+            return self._epidemic_user_token
+        
+        # Get partner token
+        partner_token = self._get_epidemic_partner_token()
+        
+        # Get user token
+        resp = requests.post(
+            "https://partner-content-api.epidemicsound.com/v0/token",
+            headers={"Authorization": f"Bearer {partner_token}"},
+            json={"userId": self.epidemic_user_id},
+            timeout=30
+        )
+        resp.raise_for_status()
+        
+        # Cache the token for 55 minutes (tokens typically valid for 1 hour)
+        self._epidemic_user_token = resp.json()["accessToken"]
+        self._epidemic_token_expiry = current_time + (55 * 60)
+        
+        return self._epidemic_user_token
+    
+    async def search_music(self, search_term: str, limit: int = 10) -> Dict[str, Any]:
+        """
+        Search for music tracks on Epidemic Sound.
+        
+        Args:
+            search_term: Search query (e.g., "cozy vlog", "energetic workout")
+            limit: Maximum number of results to return (default: 10, max: 50)
+            
+        Returns:
+            Dictionary with search results including track information
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            
+            def _search():
+                # Get user token
+                user_token = self._get_epidemic_user_token()
+                
+                # Search tracks
+                resp = requests.get(
+                    "https://partner-content-api.epidemicsound.com/v0/tracks/search",
+                    headers={"Authorization": f"Bearer {user_token}"},
+                    params={"term": search_term, "limit": min(limit, 50)},
+                    timeout=30
+                )
+                resp.raise_for_status()
+                
+                data = resp.json()
+                tracks = data.get("tracks", [])
+                
+                # Format the response with useful information
+                formatted_tracks = []
+                for track in tracks:
+                    # Get artist names from mainArtists array
+                    main_artists = track.get("mainArtists", [])
+                    artist_name = ", ".join(main_artists) if main_artists else None
+                    
+                    formatted_tracks.append({
+                        "id": track.get("id"),
+                        "title": track.get("title"),
+                        "artist": artist_name,
+                        "duration": track.get("length"),  # API uses 'length' not 'duration'
+                        "bpm": track.get("bpm"),
+                        "genres": [g.get("name") for g in track.get("genres", [])],
+                        "moods": [m.get("name") for m in track.get("moods", [])],
+                        "image_url": track.get("images", {}).get("default"),
+                        "waveform_url": track.get("waveformUrl"),
+                        "has_vocals": track.get("hasVocals", False),
+                        "is_explicit": track.get("isExplicit", False)
+                    })
+                
+                return {
+                    "status": "success",
+                    "search_term": search_term,
+                    "total_results": len(formatted_tracks),
+                    "tracks": formatted_tracks,
+                    "note": "Use download_music tool with the track ID to download and use a track"
+                }
+            
+            return await loop.run_in_executor(None, _search)
+            
+        except requests.exceptions.HTTPError as e:
+            return {
+                "status": "error",
+                "error": f"HTTP error from Epidemic Sound API: {str(e)}",
+                "message": "Please check your API credentials and network connection."
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    async def download_music(self, track_id: str, filename: Optional[str] = None) -> str:
+        """
+        Download a music track from Epidemic Sound by track ID.
+        
+        Args:
+            track_id: The track ID from search results
+            filename: Optional custom filename (without extension). If not provided, uses track ID.
+            
+        Returns:
+            Path to the downloaded audio file in workspace
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            
+            def _download():
+                # Get user token
+                user_token = self._get_epidemic_user_token()
+                
+                # Get download URL
+                resp = requests.get(
+                    f"https://partner-content-api.epidemicsound.com/v0/tracks/{track_id}/download",
+                    headers={"Authorization": f"Bearer {user_token}"},
+                    timeout=30
+                )
+                resp.raise_for_status()
+                
+                data = resp.json()
+                download_url = data.get("url")
+                
+                if not download_url:
+                    raise Exception("No download URL returned from API")
+                
+                # Download the audio file
+                print(f"📥 Downloading track {track_id}...", file=sys.stderr)
+                audio_resp = requests.get(download_url, timeout=60)
+                audio_resp.raise_for_status()
+                
+                # Determine filename
+                output_filename = filename if filename else f"music_{track_id[:8]}"
+                
+                # Save to workspace
+                output_path = self._generate_output_filename(output_filename, ".mp3")
+                
+                with open(output_path, 'wb') as f:
+                    f.write(audio_resp.content)
+                
+                print(f"✅ Downloaded to: {output_path}", file=sys.stderr)
+                
+                return output_path
+            
+            return await loop.run_in_executor(None, _download)
+            
+        except requests.exceptions.HTTPError as e:
+            return f"Error downloading track: HTTP {e.response.status_code} - {str(e)}"
+        except Exception as e:
+            return f"Error downloading track: {str(e)}"
 

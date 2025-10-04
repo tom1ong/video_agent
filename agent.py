@@ -110,7 +110,11 @@ class VideoEditingAgent:
             env={
                 "WORKSPACE_DIR": self.workspace_dir,
                 "GEMINI_API_KEY": self.gemini_api_key or "",
-                "GEMINI_MODEL": self.model_name
+                "GEMINI_MODEL": self.model_name,
+                # Epidemic Sound credentials
+                "EPIDEMIC_ACCESS_KEY_ID": os.getenv("EPIDEMIC_ACCESS_KEY_ID", ""),
+                "EPIDEMIC_ACCESS_KEY_SECRET": os.getenv("EPIDEMIC_ACCESS_KEY_SECRET", ""),
+                "EPIDEMIC_USER_ID": os.getenv("EPIDEMIC_USER_ID", "default_user")
             }
         )
         
